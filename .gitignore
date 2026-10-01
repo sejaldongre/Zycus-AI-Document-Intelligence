@@ -1,0 +1,53 @@
+# Python virtual environment
+.venv/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Pytest cache
+.pytest_cache/
+
+# IDE / tool files
+.qodo/
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Temporary OCR/debug files
+du02_*.txt
+du02_*.png
+
+# Python tooling
+*.log
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# Generated output artifacts
+output/
+output/*.json
+output/rendered/
+output/rendered_samples/
+output/test_autodraft/
+output/du05_pages/
+
+# Assignment documents
+candidate_kit/documents/
+
+# Local development/debug scripts
+src/classification_test.py
+src/document_analysis.py
+src/document_inventory.py
+src/information_extraction_test.py
+src/master_data_analysis.py
+src/ocr_debug.py
+src/render_samples.py
+check_classifier.py
+check_erp.py
