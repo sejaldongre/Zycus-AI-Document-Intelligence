@@ -1,3 +1,4 @@
+
 from pathlib import Path
 import json
 
@@ -91,12 +92,29 @@ class AutoDraftBuilder:
             supplier_match.get("supplier")
         )
 
+        # The pipeline preserves the supplier's document value in
+        # extracted["supplier"] after master-data resolution. Prefer that
+        # value so an unmatched supplier name is not lost.
+        extracted_supplier = (
+            extracted.get("supplier")
+            if isinstance(extracted.get("supplier"), dict)
+            else {}
+        )
+
+        document_supplier_name = (
+            extracted_supplier.get("name")
+            or extracted.get("supplier_name")
+        )
+
+        document_supplier_vat = (
+            extracted_supplier.get("vat_id")
+            or extracted.get("vat_id")
+        )
+
         if matched_supplier:
 
             supplier = {
-                "name": extracted.get(
-                    "supplier_name"
-                ),
+                "name": document_supplier_name,
                 "supplier_id": matched_supplier.get(
                     "supplier_id",
                     matched_supplier.get("id", "")
@@ -104,23 +122,17 @@ class AutoDraftBuilder:
                 "address": matched_supplier.get(
                     "address",
                     ""
-                ),
-                "vat_id": extracted.get(
-                    "vat_id"
-                )
+                ) or extracted_supplier.get("address", ""),
+                "vat_id": document_supplier_vat
             }
 
         else:
 
             supplier = {
-                "name": extracted.get(
-                    "supplier_name"
-                ),
+                "name": document_supplier_name,
                 "supplier_id": "",
-                "address": "",
-                "vat_id": extracted.get(
-                    "vat_id"
-                )
+                "address": extracted_supplier.get("address", ""),
+                "vat_id": document_supplier_vat
             }
 
         # =========================================================

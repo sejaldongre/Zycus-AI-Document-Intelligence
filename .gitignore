@@ -51,3 +51,7 @@ src/ocr_debug.py
 src/render_samples.py
 check_classifier.py
 check_erp.py
+
+# Generated test outputs
+test_documents/*.json
+test_documents/*.txt

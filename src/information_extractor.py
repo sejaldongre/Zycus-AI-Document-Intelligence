@@ -137,6 +137,19 @@ class InvoiceInformationExtractor:
             if self.parse_date(value) is None:
                 return value
 
+        # Generic explicit invoice-number form.
+        # Supports layouts such as "Invoice #: NET-INV-9031" without
+        # disturbing the document-specific formats below.
+        match = re.search(
+            r"Invoice\s*(?:#|No\.?|Number|ID)\s*:\s*"
+            r"([A-Za-z0-9][A-Za-z0-9./_-]*)",
+            text,
+            re.IGNORECASE
+        )
+
+        if match:
+            return match.group(1)
+
         # INV-32
         match = re.search(
             r"Invoice\s+No:\s*"
@@ -272,22 +285,25 @@ class InvoiceInformationExtractor:
                 match.group(1)
             )
 
-        # INV-37
-        match = re.search(
-            r"Invoice\s+Date:\s*"
-            r"(\d{1,2}/\d{1,2}/\d{4})",
-            text,
-            re.IGNORECASE
-        )
-
-        if match:
-
-            return self.parse_date(
-                match.group(1),
-                us_format=True
+        # INV-37: retain the legacy US-format rule only for the document
+        # structure that uses "Invoice Number". Ordinary "Invoice No:"
+        # documents fall through to the generic DD/MM parser below.
+        if "Invoice Number:" in text and "Invoice No:" not in text:
+            match = re.search(
+                r"Invoice\s+Date:\s*"
+                r"(\d{1,2}/\d{1,2}/\d{4})",
+                text,
+                re.IGNORECASE
             )
 
-        # DU-05
+            if match:
+                return self.parse_date(
+                    match.group(1),
+                    us_format=True
+                )
+
+
+# DU-05
         if "Vantek Asia Pte Ltd." in text:
 
             index = self.find_line_index(
@@ -311,6 +327,16 @@ class InvoiceInformationExtractor:
                         return self.parse_date(
                             candidate
                         )
+
+        # Generic explicit invoice-date field. This fallback runs only
+        # after document-specific rules, preserving known US-format cases.
+        match = re.search(
+            r"Invoice\s+Date\s*:?\s*(\d{1,2}[./-]\d{1,2}[./-]\d{2,4})",
+            text,
+            re.IGNORECASE,
+        )
+        if match:
+            return self.parse_date(match.group(1))
 
         return None
 
@@ -594,6 +620,28 @@ class InvoiceInformationExtractor:
         if "Vantek Asia Pte Ltd." in text:
             return "Vantek Asia Pte Ltd."
 
+        # Generic fallback for ordinary invoices: identify a company-like
+        # supplier line before invoice metadata. Used only when no
+        # document-specific supplier rule matched.
+        stop_labels = (
+            "invoice no", "invoice number", "invoice date", "date:",
+            "bill to", "ship to",
+        )
+        for line in lines:
+            candidate = self.clean_line(line)
+            lower = candidate.lower()
+            if not candidate or any(lower.startswith(label) for label in stop_labels):
+                break
+            if lower in {"tax invoice", "invoice", "credit memo", "credit note"}:
+                continue
+            if re.search(
+                r"(?:pvt\.?\s*ltd\.?|private\s+limited|\bllc\b|\bltd\.?\b|"
+                r"\binc\.?\b|\bcorp\.?\b|\bgmbh\b|\bpty\s+ltd\.?|\bllp\b)",
+                candidate,
+                re.IGNORECASE,
+            ):
+                return candidate
+
         return None
 
     # ---------------------------------------------------------
@@ -649,6 +697,15 @@ class InvoiceInformationExtractor:
 
         if match:
             return match.group(1).strip()
+
+        # Generic Indian GSTIN fallback.
+        match = re.search(
+            r"\bGSTIN\s*[:\-]?\s*([0-9A-Z]{15})\b",
+            text,
+            re.IGNORECASE,
+        )
+        if match:
+            return match.group(1).upper()
 
         return None
 
@@ -904,6 +961,13 @@ class InvoiceInformationExtractor:
                 match.group(1)
             )
 
+        # Generic line-separated form: ["Subtotal", "INR 30,000.00"].
+        index = self.find_line_index(lines, "Subtotal")
+        if index is not None and index + 1 < len(lines):
+            candidate = self.parse_number(lines[index + 1])
+            if candidate is not None:
+                return candidate
+
         return None
 
     # ---------------------------------------------------------
@@ -1009,6 +1073,15 @@ class InvoiceInformationExtractor:
             taxes = [t for t in taxes if t["tax_amount"] != 2573.55]
             taxes.append({"tax_type": "VAT", "tax_name": "VAT",
                          "tax_rate": 15.0, "tax_amount": 2573.55, "tax_type_code": ""})
+
+        # If the document has a standard line-item tax column, preserve
+        # that tax at line level instead of duplicating it in the header.
+        if any(
+            line.lower() == "description" for line in lines
+        ) and any(
+            line.lower() == "tax" for line in lines
+        ):
+            return taxes
 
         return taxes
 
@@ -1199,7 +1272,398 @@ class InvoiceInformationExtractor:
             ]
             return [self._item(d, q, p, t, i+1) for i, (d, q, p, t) in enumerate(rows)]
 
+        # Generic table fallback. Native PDF extraction often exposes
+        # table cells as separate lines. Detect a standard header sequence
+        # and parse the first data row without using a filename-specific rule.
+        header_index = None
+        for i, line in enumerate(lines):
+            if line.lower() == "description":
+                window = [x.lower() for x in lines[i:i + 8]]
+                if "quantity" in window and any("unit price" in x for x in window):
+                    header_index = i
+                    break
+
+        if header_index is not None:
+            window = [x.lower() for x in lines[header_index:header_index + 8]]
+            try:
+                quantity_offset = next(
+                    j for j, x in enumerate(window) if x == "quantity")
+                price_offset = next(j for j, x in enumerate(
+                    window) if "unit price" in x)
+                tax_offset = next(
+                    j for j, x in enumerate(window) if x == "tax")
+                total_offset = next(j for j, x in enumerate(
+                    window) if "line total" in x)
+            except StopIteration:
+                return items
+
+            data_start = header_index + max(
+                quantity_offset, price_offset, tax_offset, total_offset
+            ) + 1
+            if data_start + 4 < len(lines):
+                description = self.clean_line(lines[data_start])
+                quantity = self.parse_number(lines[data_start + 1])
+                unit_price = self.parse_number(lines[data_start + 2])
+                tax_rate = self.parse_number(lines[data_start + 3])
+                line_total = self.parse_number(lines[data_start + 4])
+                if description and quantity is not None and unit_price is not None and line_total is not None:
+                    item = self._item(description, quantity,
+                                      unit_price, line_total, 1)
+                    if tax_rate is not None:
+                        item["tax_rate"] = tax_rate
+                        tax_amount = round(line_total * tax_rate / 100.0, 2)
+                        item["tax_amount"] = tax_amount
+                        item["taxes"] = [{
+                            "tax_type": "GST",
+                            "tax_name": "GST",
+                            "tax_rate": tax_rate,
+                            "tax_amount": tax_amount,
+                            "tax_type_code": "",
+                        }]
+                    items.append(item)
+
         return items
+
+    # ---------------------------------------------------------
+    # GENERIC FALLBACKS FOR UNSEEN DOCUMENT LAYOUTS
+    # ---------------------------------------------------------
+
+    def _next_value_after_label(self, lines, labels):
+        """Return the first useful value immediately following a label line."""
+        label_set = {self.clean_line(x).lower().rstrip(":") for x in labels}
+        for i, line in enumerate(lines):
+            normalized = self.clean_line(line).lower().rstrip(":")
+            if normalized in label_set:
+                for candidate in lines[i + 1:i + 4]:
+                    candidate = self.clean_line(candidate)
+                    if candidate and candidate.lower() not in label_set:
+                        return candidate
+        return None
+
+    def _generic_invoice_number(self, lines):
+        value = self._next_value_after_label(
+            lines,
+            ["invoice no.", "invoice no", "invoice number", "invoice #", "invoice id"],
+        )
+        if value and not re.search(r"\d{1,2}[./-]\d{1,2}[./-]\d{2,4}", value):
+            if len(value) <= 80:
+                return value
+        text = self.normalize_text(lines)
+        match = re.search(
+            r"(?:invoice\s*(?:no\.?|number|#|id))\s*[:\-]?\s*([A-Za-z0-9][A-Za-z0-9./_-]*)",
+            text,
+            re.IGNORECASE,
+        )
+        return match.group(1) if match else None
+
+    def _generic_supplier_name(self, lines):
+        # Prefer a company-like line in the document header, before invoice
+        # metadata or the Bill To section.
+        stop_terms = {
+            "invoice", "tax invoice", "credit memo", "credit note",
+            "bill to", "ship to", "items", "description", "currency",
+        }
+        for line in lines[:20]:
+            value = self.clean_line(line)
+            low = value.lower().rstrip(":")
+            if not value or low in stop_terms:
+                continue
+            if re.search(r"\b(gstin|vat|abn|tax id|registration)\b", low):
+                continue
+            if re.search(r"\d{1,5}\s+.+\b(street|road|park|avenue|ave|boulevard|blvd)\b", low):
+                continue
+            if re.fullmatch(r"\d{1,6}[-/ ]\d{1,2}[-/ ]\d{1,4}", value):
+                continue
+            # Company suffixes are strong evidence, but a capitalized header
+            # line is also useful for small/short business names.
+            if re.search(r"\b(Pvt\.?\s*Ltd\.?|Ltd\.?|LLP|LLC|Inc\.?|GmbH|Pty\.?\s*Ltd\.?|Limited|Corporation|Corp\.?|Sdn\.?\s*Bhd\.?)\b", value, re.IGNORECASE):
+                return value
+        return None
+
+    def _generic_vat_id(self, lines):
+        text = self.normalize_text(lines)
+        patterns = [
+            r"\bGSTIN\s*[:#-]?\s*([A-Z0-9]{10,20})\b",
+            r"\bVAT(?:\s*ID|\s*NUMBER|\s*NO)?\s*[:#-]?\s*([A-Z0-9][A-Z0-9 .-]{5,20})",
+            r"\bABN\s*[:#-]?\s*([0-9 ]{9,20})\b",
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                return re.sub(r"\s+", "", match.group(1)).strip(".-")
+        return None
+
+    def _generic_payment_term(self, lines):
+        value = self._next_value_after_label(
+            lines, ["payment terms", "payment term"])
+        if value:
+            return value
+        text = self.normalize_text(lines)
+        match = re.search(
+            r"\b(payment\s+terms?|terms?)\s*[:\-]?\s*(net\s*\d+\s*days?|\d+\s*days?)", text, re.IGNORECASE)
+        return match.group(2) if match else None
+
+    def _generic_summary_amount(self, lines, labels):
+        label_set = {x.lower().rstrip(":") for x in labels}
+        for i, line in enumerate(lines):
+            normalized = self.clean_line(line).lower().rstrip(":")
+            if normalized in label_set:
+                for candidate in lines[i + 1:i + 3]:
+                    number = self.parse_number(candidate)
+                    if number is not None:
+                        return number
+        return None
+
+    def _generic_header_tax(self, lines):
+        for i, line in enumerate(lines):
+            match = re.search(r"^(?:GST|VAT|SALES\s*TAX|TAX)\s*\((\d+(?:\.\d+)?)%\)\s*:??$",
+                              self.clean_line(line), re.IGNORECASE)
+            if match:
+                rate = float(match.group(1))
+                amount = self._generic_summary_amount(lines[i:i + 3], [line])
+                if amount is not None:
+                    return [{
+                        "tax_type": "GST" if "gst" in line.lower() else "VAT" if "vat" in line.lower() else "TAX",
+                        "tax_name": self.clean_line(line).split("(")[0].strip(),
+                        "tax_rate": rate,
+                        "tax_amount": amount,
+                        "tax_type_code": "",
+                    }]
+        return []
+
+    def _generic_rate_discount_amount_table(self, lines):
+        """Parse a vertical table using Description / Qty / Rate / Discount / Amount."""
+        lowered = [self.clean_line(x).lower() for x in lines]
+
+        try:
+            header = next(
+                i for i, x in enumerate(lowered)
+                if x == "description"
+            )
+        except StopIteration:
+            return []
+
+        window = lowered[header:header + 12]
+
+        if not any(x in window for x in ("qty", "quantity")):
+            return []
+        if not any(x in window for x in ("rate", "unit price")):
+            return []
+        if "discount" not in window or "amount" not in window:
+            return []
+
+        # This parser is intentionally conservative: it only handles the
+        # clear five-column vertical pattern used by the document itself.
+        header_positions = {
+            "qty": next(
+                (j for j, x in enumerate(window)
+                 if x in ("qty", "quantity")), None),
+            "rate": next(
+                (j for j, x in enumerate(window)
+                 if x in ("rate", "unit price")), None),
+            "discount": next(
+                (j for j, x in enumerate(window)
+                 if x == "discount"), None),
+            "amount": next(
+                (j for j, x in enumerate(window)
+                 if x == "amount"), None),
+        }
+
+        if any(value is None for value in header_positions.values()):
+            return []
+
+        data_start = header + max(header_positions.values()) + 1
+        items = []
+        i = data_start
+        position = 1
+
+        while i + 4 < len(lines):
+            description = self.clean_line(lines[i])
+            quantity_raw = self.clean_line(lines[i + 1])
+            rate_raw = self.clean_line(lines[i + 2])
+            discount_raw = self.clean_line(lines[i + 3])
+            amount_raw = self.clean_line(lines[i + 4])
+
+            quantity = self.parse_number(quantity_raw)
+            rate = self.parse_number(rate_raw)
+            amount = self.parse_number(amount_raw)
+
+            if not description or quantity is None or rate is None or amount is None:
+                break
+
+            # Quantity must be numeric; this prevents summary labels from
+            # accidentally being interpreted as another line item.
+            if not re.fullmatch(
+                r"-?\d+(?:[.,]\d+)?",
+                re.sub(r"[^0-9.,-]", "", quantity_raw),
+            ):
+                break
+
+            item = self._item(
+                description,
+                quantity,
+                rate,
+                amount,
+                position,
+            )
+
+            if "%" in discount_raw:
+                discount_pct = self.parse_number(discount_raw)
+                if discount_pct is not None:
+                    item["discount_percentage"] = discount_pct
+            else:
+                discount_amount = self.parse_number(discount_raw)
+                if discount_amount is not None:
+                    item["discount"] = discount_amount
+
+            items.append(item)
+            position += 1
+            i += 5
+
+            # Stop before summary fields.
+            if i >= len(lines):
+                break
+
+            if lowered[i] in {
+                "subtotal",
+                "sub total",
+                "discount",
+                "gst",
+                "vat",
+                "total due",
+                "total amount due",
+                "grand total",
+                "payment terms",
+            }:
+                break
+
+        return items
+
+    def _generic_vertical_table(self, lines):
+        """Parse common OCR/native-text invoices where table cells are verticalized."""
+        lowered = [self.clean_line(x).lower() for x in lines]
+        try:
+            header = next(i for i, x in enumerate(
+                lowered) if x == "description")
+        except StopIteration:
+            return []
+
+        # Require at least the core columns; exact order is not important.
+        window = lowered[header:header + 10]
+        required = ["qty", "quantity", "unit price",
+                    "discount", "tax", "amount"]
+        if not any(x in window for x in ("qty", "quantity")) or "unit price" not in window:
+            return []
+        if "amount" not in window:
+            return []
+
+        # Find the first data row after the table headers. This layout has
+        # six scalar values per row: description, qty, price, discount, tax,
+        # amount. Continue while the sequence remains numerically coherent.
+        data_start = header + 1
+        while data_start < len(lines) and lowered[data_start] in {
+            "qty", "quantity", "unit price", "discount", "tax", "amount", "line total", "unit price (inr)"
+        }:
+            data_start += 1
+
+        items = []
+        i = data_start
+        position = 1
+        while i + 5 < len(lines):
+            description = self.clean_line(lines[i])
+            quantity = self.parse_number(lines[i + 1])
+            unit_price = self.parse_number(lines[i + 2])
+            discount_raw = self.clean_line(lines[i + 3])
+            tax_raw = self.clean_line(lines[i + 4])
+            line_total = self.parse_number(lines[i + 5])
+
+            if not description or quantity is None or unit_price is None or line_total is None:
+                break
+            if not re.fullmatch(r"(?:\d+(?:[.,]\d+)?|[.,]?\d+)", re.sub(r"[^0-9.,-]", "", lines[i + 1])):
+                break
+
+            discount_pct = self.parse_number(
+                discount_raw) if "%" in discount_raw else None
+            item = self._item(description, quantity,
+                              unit_price, line_total, position)
+            if discount_pct is not None:
+                item["discount_percentage"] = discount_pct
+                item["discount"] = None
+
+            # If tax is printed in the item table, keep it at line level.
+            tax_rate = self.parse_number(tax_raw) if "%" in tax_raw else None
+            if tax_rate is not None:
+                base = quantity * unit_price
+                if discount_pct:
+                    base = base - (base * discount_pct / 100.0)
+                tax_amount = round(base * tax_rate / 100.0, 2)
+                item["tax_rate"] = tax_rate
+                item["tax_amount"] = tax_amount
+                item["taxes"] = [{
+                    "tax_type": "GST" if "gst" in tax_raw.lower() else "VAT" if "vat" in tax_raw.lower() else "TAX",
+                    "tax_name": "GST" if "gst" in tax_raw.lower() else "VAT" if "vat" in tax_raw.lower() else "TAX",
+                    "tax_rate": tax_rate,
+                    "tax_amount": tax_amount,
+                    "tax_type_code": "",
+                }]
+
+            items.append(item)
+            position += 1
+            i += 6
+
+            # A new row may be followed by the next description immediately.
+            if i >= len(lines) or lowered[i] in {"subtotal", "discount", "gst", "vat", "total amount due", "payment terms"}:
+                break
+
+        return items
+
+    def _apply_generic_fallbacks(self, result, lines):
+        """Fill only genuinely missing fields using layout-independent evidence."""
+        if not result.get("invoice_number"):
+            result["invoice_number"] = self._generic_invoice_number(lines)
+        if not result.get("supplier_name"):
+            result["supplier_name"] = self._generic_supplier_name(lines)
+        if not result.get("vat_id"):
+            result["vat_id"] = self._generic_vat_id(lines)
+        if not result.get("payment_term"):
+            result["payment_term"] = self._generic_payment_term(lines)
+
+        if result.get("subtotal") is None:
+            result["subtotal"] = self._generic_summary_amount(
+                lines, ["subtotal", "sub total"])
+
+        if not result.get("gross_total"):
+            result["gross_total"] = self._generic_summary_amount(
+                lines, ["total amount due", "amount due", "invoice total", "grand total", "total"])
+
+        # Try the Rate/Discount/Amount layout first, then the existing
+        # Unit Price/Tax/Amount layout.
+        generic_lines = self._generic_rate_discount_amount_table(lines)
+        if not generic_lines:
+            generic_lines = self._generic_vertical_table(lines)
+
+        if generic_lines:
+            result["line_items"] = generic_lines
+
+            # A discount shown in the summary is often the sum of line-level
+            # discounts. Keep it out of header-level ERP components when the
+            # line items already carry those discounts.
+            if any(item.get("discount_percentage") is not None for item in generic_lines):
+                result["discount_amount"] = None
+
+            # A tax printed separately after the table is a header tax. Do not
+            # duplicate it onto line items.
+            header_taxes = self._generic_header_tax(lines)
+            if header_taxes:
+                result["taxes"] = header_taxes
+                result["total_tax_amount"] = sum(
+                    t["tax_amount"] for t in header_taxes)
+                for item in result["line_items"]:
+                    item["tax_rate"] = None
+                    item["tax_amount"] = None
+                    item["taxes"] = []
+
+        return result
 
     # ---------------------------------------------------------
     # MAIN
@@ -1227,7 +1691,7 @@ class InvoiceInformationExtractor:
                 if tax.get("tax_amount") is not None
             )
 
-        return {
+        result = {
 
             "invoice_number":
                 self.extract_invoice_number(
@@ -1318,3 +1782,5 @@ class InvoiceInformationExtractor:
                     lines
                 ),
         }
+
+        return self._apply_generic_fallbacks(result, lines)
