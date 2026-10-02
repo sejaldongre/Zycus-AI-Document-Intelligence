@@ -1,12 +1,26 @@
 # Zycus AI Document Intelligence
 
-## Bookable Payable — Autodraft Generation System
+## Bookable Payable — AutoDraft Generation System
 
-An automated document-intelligence pipeline that converts supplier PDF documents into structured accounting autodrafts for downstream ERP booking.
+An automated document-intelligence pipeline that converts supplier PDF documents into structured accounting AutoDrafts for downstream ERP booking.
 
-The system determines whether a document represents a bookable payable, extracts the financial information required by the AutoDraft schema, resolves available master-data references, and generates one JSON output for each input PDF.
+The system determines whether a document represents a bookable payable, extracts the financial information required by the AutoDraft schema, resolves available master-data references, validates the extracted financial structure, and generates one JSON output for each input PDF.
 
 ---
+
+## Live Demo and Source Code
+
+### Live Demo
+
+The Streamlit application is deployed and available here:
+
+**Live Demo:** https://zycus-ai-document-intelligence.onrender.com
+
+### GitHub Repository
+
+The complete source code and project files are available here:
+
+**GitHub:** https://github.com/sejaldongre/Zycus-AI-Document-Intelligence
 
 ## 1. Objective
 
@@ -65,6 +79,9 @@ Financial Validation
 AutoDraft Generation
      |
      v
+ERP Validation
+     |
+     v
 output/X.json
 ```
 
@@ -78,6 +95,7 @@ For example:
 - Discounts remain separate from prices.
 - Charges and levies remain decomposed.
 - Master-data codes are populated only when a genuine match exists.
+- Documents identified as non-payables are represented in `declined[]`.
 
 ---
 
@@ -86,33 +104,51 @@ For example:
 ```text
 Zycus AI Document Intelligence/
 |
-├── candidate_kit/
-│   ├── documents/
-│   ├── master_data/
-│   ├── AUTODRAFT_SCHEMA.md
-│   ├── README.md
-│   ├── erp.py
-│   ├── example_check.py
-│   └── sample_autodraft.json
+|-- candidate_kit/
+|   |-- documents/
+|   |-- master_data/
+|   |   |-- README.md
+|   |   |-- chart_of_books.json
+|   |   |-- payment_terms.json
+|   |   |-- po_master.json
+|   |   |-- suppliers.json
+|   |   `-- tax_master.json
+|   |-- AUTODRAFT_SCHEMA.md
+|   |-- README.md
+|   |-- erp.py
+|   |-- example_check.py
+|   `-- sample_autodraft.json
 |
-├── src/
-│   ├── autodraft_builder.py
-│   ├── document_classifier.py
-│   ├── document_extractor.py
-│   ├── financial_validator.py
-│   ├── information_extractor.py
-│   ├── master_data.py
-│   ├── master_data_resolver.py
-│   ├── ocr.py
-│   ├── pdf_utils.py
-│   ├── pipeline.py
-│   ├── run_all.py
-│   └── validate_all.py
+|-- src/
+|   |-- autodraft_builder.py
+|   |-- document_classifier.py
+|   |-- document_extractor.py
+|   |-- financial_validator.py
+|   |-- information_extractor.py
+|   |-- master_data.py
+|   |-- master_data_resolver.py
+|   |-- ocr.py
+|   |-- pdf_utils.py
+|   |-- pipeline.py
+|   |-- run_all.py
+|   |-- schema_validator.py
+|   |-- validate_all.py
+|   `-- validate_erp.py
 |
-├── output/
-├── check_erp.py
-├── DESIGN.md
-└── README.md
+|-- test_documents/
+|   |-- run_test_documents.py
+|   |-- validate_test_erp.py
+|   `-- test PDF documents
+|
+|-- output/
+|   `-- generated JSON outputs
+|
+|-- app.py
+|-- Dockerfile
+|-- requirements.txt
+|-- DESIGN.md
+|-- README.md
+`-- .gitignore
 ```
 
 ---
@@ -121,9 +157,15 @@ Zycus AI Document Intelligence/
 
 ### Python
 
-The project runs inside the project's Python virtual environment.
+The project uses Python 3.13.
 
-Activate the environment:
+Install the required Python packages with:
+
+```powershell
+pip install -r requirements.txt
+```
+
+For local development, a virtual environment can be used:
 
 ```powershell
 .venv\Scripts\Activate.ps1
@@ -133,59 +175,35 @@ Activate the environment:
 
 The system uses Tesseract OCR when native PDF text extraction is insufficient.
 
-The OCR executable is configured in:
+The OCR implementation supports:
 
-```text
-src/ocr.py
-```
-
-The current configuration expects:
-
-```text
-C:\Program Files\Tesseract-OCR\tesseract.exe
-```
+- Tesseract available on the system PATH.
+- A custom executable configured through the `TESSERACT_CMD` environment variable.
+- The standard Windows Tesseract installation path as a local fallback.
+- Docker environments where Tesseract is installed by the provided `Dockerfile`.
 
 ---
 
 ## 5. Running the System
 
-From the project root:
-
-```text
-C:\Sejal Projects\Zycus AI Document Intelligence
-```
-
-run the following command:
+The main command for processing the assignment documents is:
 
 ```powershell
 python -m src.run_all
 ```
 
-This is the main command for the project.
-
 The command automatically:
 
-1. Reads all PDFs from:
-
-```text
-candidate_kit/documents/
-```
-
-2. Processes each document.
-
-3. Determines whether the document contains a payable.
-
-4. Extracts the required information.
-
-5. Resolves available master-data references.
-
-6. Generates one JSON file per PDF.
-
-7. Writes the results to:
-
-```text
-output/
-```
+1. Reads PDFs from `candidate_kit/documents/`.
+2. Extracts native PDF text when available.
+3. Uses OCR when native text is insufficient.
+4. Classifies each document.
+5. Determines whether it is a payable.
+6. Extracts the required accounting information.
+7. Resolves available master-data references.
+8. Validates financial components.
+9. Generates one JSON file per PDF.
+10. Writes the results to `output/`.
 
 For example:
 
@@ -215,21 +233,27 @@ The output follows the required structure:
 }
 ```
 
-### Payable document
+### Payable Document
 
-A payable is represented inside:
+A payable is represented inside `payables[]`:
 
 ```json
-"payables": [
-  {
-    "invoice_type": "INVOICE",
-    "currency": "EUR",
-    "gross_total": "...",
-    "line_items": [],
-    "taxes": []
-  }
-]
+{
+  "file": "INV-01.pdf",
+  "payables": [
+    {
+      "invoice_type": "INVOICE",
+      "currency": "EUR",
+      "gross_total": "...",
+      "line_items": [],
+      "taxes": []
+    }
+  ],
+  "declined": []
+}
 ```
+
+### Credit Memo
 
 A credit memo uses the same AutoDraft schema with:
 
@@ -237,20 +261,23 @@ A credit memo uses the same AutoDraft schema with:
 "invoice_type": "CREDIT_MEMO"
 ```
 
-and its monetary values are represented using the document's positive magnitudes.
+Its monetary values use the positive magnitudes stated by the credit memo, consistent with the supplied ERP sign handling.
 
-### Non-payable document
+### Non-Payable Document
 
-A document that is determined not to be a payable is represented using:
+A document determined not to be a payable is represented using `declined[]`:
 
 ```json
-"payables": [],
-"declined": [
-  {
-    "doc_type": "...",
-    "reason": "..."
-  }
-]
+{
+  "file": "INV-02.pdf",
+  "payables": [],
+  "declined": [
+    {
+      "doc_type": "...",
+      "reason": "..."
+    }
+  ]
+}
 ```
 
 A document can contain zero, one, or multiple payable records.
@@ -266,19 +293,17 @@ If the available native text is insufficient, the system:
 1. Renders the PDF pages.
 2. Runs OCR on the rendered pages.
 3. Cleans the extracted text.
-4. Passes the resulting document text to the downstream pipeline.
+4. Passes the resulting text to the downstream pipeline.
 
-This allows the system to process both digitally generated PDFs and image-based documents.
+This supports both digitally generated PDFs and image-based documents.
 
 ---
 
 ## 8. Document Classification
 
-Before generating an AutoDraft, the system classifies the document.
+Before generating an AutoDraft, the system classifies the document using evidence present in the document.
 
-The classifier uses evidence present in the document, including document terminology and financial/document signals.
-
-Examples include:
+Signals include:
 
 - Invoice terminology
 - Credit memo terminology
@@ -286,6 +311,7 @@ Examples include:
 - Invoice numbers
 - Dates
 - Payment-related information
+- Financial and document signals
 
 Documents identified as non-payables are not forced into the payable schema.
 
@@ -326,6 +352,7 @@ The project includes reference data for:
 - Buyer organisation information
 - Payment terms
 - Purchase orders
+- Chart of accounts
 
 Document values are matched against the supplied master data.
 
@@ -353,7 +380,9 @@ The validation considers relationships between:
 - Subtotals
 - Gross totals
 
-The financial validator is used as a diagnostic layer while the supplied ERP recomputation provides the final accounting check.
+The financial validator acts as a diagnostic consistency layer.
+
+The supplied ERP recomputation is used as the final accounting validation for generated payables.
 
 ---
 
@@ -364,24 +393,23 @@ The challenge provides `candidate_kit/erp.py` as the ERP recomputation used to d
 The project includes:
 
 ```text
-check_erp.py
+src/validate_erp.py
 ```
 
-as a validation utility.
+for validating the generated outputs against the supplied ERP logic.
 
 Run:
 
 ```powershell
-python check_erp.py
+python -m src.validate_erp
 ```
 
-The final generated outputs currently produce:
+Current validation results:
 
 ```text
 Total payables : 24
 ERP PASS       : 24
 ERP FAIL       : 0
-Pass rate      : 100.00%
 ```
 
 The ERP validation is performed from the generated payable components rather than simply comparing a copied document total.
@@ -390,7 +418,7 @@ The ERP validation is performed from the generated payable components rather tha
 
 ## 13. Structural Validation
 
-The project also includes:
+The project includes:
 
 ```text
 src/validate_all.py
@@ -399,21 +427,23 @@ src/validate_all.py
 Run:
 
 ```powershell
-python src/validate_all.py
+python -m src.validate_all
 ```
 
-The current generated outputs produce:
+Current validation results:
 
 ```text
+Found 42 JSON files.
+
 Valid   : 42
 Invalid : 0
 ```
 
 ---
 
-## 14. Current Validation Results
+## 14. Validation Results
 
-The current implementation has been tested on the supplied 42 PDF documents.
+The implementation was tested on the supplied 42 PDF documents.
 
 | Validation           | Result |
 | -------------------- | -----: |
@@ -427,41 +457,63 @@ The current implementation has been tested on the supplied 42 PDF documents.
 | ERP payable failures |      0 |
 | ERP pass rate        |   100% |
 
+Additional local test documents were also used to test:
+
+- Standard invoices
+- Discount invoices
+- Credit memos
+- Payment reminders
+- Line-level taxes
+- Header-level taxes
+- Documents with different currencies
+- Unseen invoice layouts
+
 ---
 
 ## 15. Design Principles
 
-The implementation follows these principles:
+The implementation follows these principles.
 
-1. **Evidence over assumptions**  
-   Values are extracted from the document rather than invented.
+### 1. Evidence over assumptions
 
-2. **Structure over total-only matching**  
-   Quantities, prices, discounts, taxes and charges are preserved according to their placement in the document.
+Values are extracted from the document rather than invented.
 
-3. **Conservative master-data matching**  
-   Internal codes are emitted only when supported by a genuine master-data match.
+### 2. Structure over total-only matching
 
-4. **Payable vs. non-payable separation**  
-   Documents that are not bookable payables are placed in `declined[]`.
+Quantities, prices, discounts, taxes and charges are preserved according to their placement in the document.
 
-5. **OCR fallback**  
-   Image-based documents are processed when native PDF text is insufficient.
+### 3. Conservative master-data matching
 
-6. **ERP verification**  
-   Generated payable components are checked against the supplied ERP recomputation.
+Internal codes are emitted only when supported by a genuine master-data match.
+
+### 4. Payable vs. non-payable separation
+
+Documents that are not bookable payables are placed in `declined[]`.
+
+### 5. OCR fallback
+
+Image-based documents are processed when native PDF text is insufficient.
+
+### 6. ERP verification
+
+Generated payable components are checked against the supplied ERP recomputation.
 
 ---
 
 ## 16. Design Documentation
 
-The reasoning behind the extraction strategy, handling of unseen documents, and exceptional document cases is documented separately in:
+The reasoning behind the extraction strategy, handling of documents unlike those already seen, and exceptional document cases is documented separately in:
 
 ```text
 DESIGN.md
 ```
 
-This document explains how the system approaches generalisation beyond the supplied examples.
+The design document addresses:
+
+- What was learned about the document set.
+- How the system handles documents unlike those already seen.
+- How the system avoids unsupported guesses.
+- Which document required special consideration and why.
 
 ---
 
@@ -479,14 +531,108 @@ the generated files are available under:
 output/
 ```
 
-with one JSON file corresponding to each input PDF:
+There is one JSON file corresponding to each input PDF.
+
+Example:
 
 ```text
 output/
-├── DU-02.json
-├── DU-03.json
-├── ...
-└── INV-37.json
+|-- DU-02.json
+|-- DU-03.json
+|-- DU-05.json
+|-- ...
+`-- INV-37.json
 ```
 
-The output directory is created automatically if it does not already exist.
+---
+
+## 18. Streamlit Demo
+
+A Streamlit interface is included in:
+
+```text
+app.py
+```
+
+The interface provides a visual demonstration of the document-intelligence pipeline for an uploaded PDF.
+
+The demo displays the processing stages, including:
+
+- PDF extraction
+- OCR fallback
+- Document classification
+- Information extraction
+- Master-data resolution
+- Financial validation
+- AutoDraft generation
+- Output inspection
+
+---
+
+## 19. Docker Deployment
+
+The project includes a `Dockerfile` for containerized execution.
+
+The Docker image installs:
+
+- Python 3.13
+- Tesseract OCR
+- Project Python dependencies
+
+The container starts the Streamlit application.
+
+Build the image with:
+
+```bash
+docker build -t zycus-ai-document-intelligence .
+```
+
+Run it with:
+
+```bash
+docker run -p 8501:8501 zycus-ai-document-intelligence
+```
+
+The Streamlit application can then be accessed locally at:
+
+```text
+http://localhost:8501
+```
+
+---
+
+## 20. Scope
+
+The implementation focuses on the requirements of the assignment:
+
+- Document understanding
+- Payable classification
+- Financial information extraction
+- Master-data resolution
+- Financial structure preservation
+- Financial validation
+- ERP validation
+- JSON AutoDraft generation
+- OCR fallback
+- Non-payable identification
+
+The system does not introduce external accounting assumptions into generated records.
+
+---
+
+## 21. Final Submission Contents
+
+The submission package contains:
+
+- Working source code
+- Assignment schema and ERP logic
+- Master-data files
+- Generated `output/*.json` files
+- `DESIGN.md`
+- `README.md`
+- `requirements.txt`
+- `Dockerfile`
+- Streamlit demonstration application
+- Local test documents and validation scripts
+
+The Python virtual environment, Git metadata, debug artifacts, temporary OCR files, and generated rendering/debug directories are excluded from the submission package.
